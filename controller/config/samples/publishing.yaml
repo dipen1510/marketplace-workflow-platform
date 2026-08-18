@@ -1,0 +1,30 @@
+apiVersion: workflow.marketplace.example.com/v1alpha1
+kind: MarketplaceWorkflow
+
+metadata:
+  name: publishing
+  namespace: argo
+
+spec:
+
+  schedules:
+    - "*/2 * * * *"
+
+  timezone: "America/Los_Angeles"
+
+  suspend: false
+
+  concurrencyPolicy: Forbid
+
+  startingDeadlineSeconds: 60
+
+  successfulRunsHistoryLimit: 5
+
+  failedRunsHistoryLimit: 5
+
+  workflowTemplateRef:
+    name: marketplace-publishing
+
+  parameters:
+    - name: failureMode
+      value: success

@@ -1,0 +1,75 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+
+metadata:
+  name: marketplace-image-validation
+  namespace: argo
+
+spec:
+  entrypoint: image-validation
+
+  arguments:
+    parameters:
+      - name: failureMode
+        value: success
+
+  templates:
+
+    # ==========================================
+    # Image Validation DAG
+    # ==========================================
+    - name: image-validation
+
+      dag:
+        tasks:
+
+          - name: discover-images
+            template: discover-images
+
+          - name: validate-images
+            dependencies:
+              - discover-images
+            template: validate-images
+
+    # ==========================================
+    # Discover Images
+    # ==========================================
+    - name: discover-images
+
+      container:
+        image: marketplace-worker:v0.2.0
+        imagePullPolicy: IfNotPresent
+
+        command:
+          - /usr/local/bin/marketplace-worker
+
+        args:
+          - --operation=discover
+
+    # ==========================================
+    # Validate Images
+    # ==========================================
+    - name: validate-images
+
+      retryStrategy:
+        limit: "2"
+
+        retryPolicy: "OnFailure"
+
+        expression: "lastRetry.exitCode == '10'"
+
+        backoff:
+          duration: "5s"
+          factor: 2
+
+      container:
+        image: marketplace-worker:v0.2.0
+        imagePullPolicy: IfNotPresent
+
+        command:
+          - /usr/local/bin/marketplace-worker
+
+        args:
+          - --operation=validate
+          - --failure-mode={{workflow.parameters.failureMode}}
+          - --attempt={{retries}}

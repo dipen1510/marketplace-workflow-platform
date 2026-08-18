@@ -1,0 +1,52 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - argoproj.io
+  resources:
+  - cronworkflows
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - argoproj.io
+  resources:
+  - workflowtemplates
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - workflow.marketplace.example.com
+  resources:
+  - marketplaceworkflows
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - workflow.marketplace.example.com
+  resources:
+  - marketplaceworkflows/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - workflow.marketplace.example.com
+  resources:
+  - marketplaceworkflows/status
+  verbs:
+  - get
+  - patch
+  - update

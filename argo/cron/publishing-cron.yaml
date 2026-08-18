@@ -1,0 +1,38 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+
+metadata:
+  name: marketplace-publishing
+  namespace: argo
+
+spec:
+  # Development schedule:
+  # every 2 minutes
+  schedules:
+    - "*/2 * * * *"
+
+  timezone: "America/Los_Angeles"
+
+  # For now allow overlapping publishing runs.
+  concurrencyPolicy: "Forbid"
+
+  suspend: false
+
+  startingDeadlineSeconds: 60
+
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 5
+
+  workflowMetadata:
+    labels:
+      marketplace.oracle.com/workflow-type: publishing
+
+  workflowSpec:
+
+    arguments:
+      parameters:
+        - name: failureMode
+          value: success
+
+    workflowTemplateRef:
+      name: marketplace-publishing

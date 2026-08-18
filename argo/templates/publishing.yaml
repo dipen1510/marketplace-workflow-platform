@@ -1,0 +1,123 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+
+metadata:
+  name: marketplace-publishing
+  namespace: argo
+
+spec:
+  entrypoint: publishing
+
+  arguments:
+    parameters:
+      - name: failureMode
+        value: success
+
+  templates:
+
+    # ==========================================
+    # Main publishing DAG
+    # ==========================================
+
+    - name: publishing
+
+      dag:
+        tasks:
+
+          - name: discover
+            template: discover
+
+          - name: validate
+            dependencies:
+              - discover
+            template: validate
+
+          - name: publish
+            dependencies:
+              - validate
+            template: publish
+
+    # ==========================================
+    # Step 1 - Discover
+    # ==========================================
+
+    - name: discover
+
+      container:
+
+        image: marketplace-worker:v0.2.0
+
+        imagePullPolicy: IfNotPresent
+
+        command:
+          - /usr/local/bin/marketplace-worker
+
+        args:
+          - --operation=discover
+
+    # ==========================================
+    # Step 2 - Validate
+    # ==========================================
+
+    - name: validate
+
+      retryStrategy:
+
+        # Initial execution + 2 retries
+        # = maximum 3 total attempts
+        limit: "2"
+
+        retryPolicy: "OnFailure"
+
+        # Only exit code 10 is retryable
+        expression: "lastRetry.exitCode == '10'"
+
+        backoff:
+          duration: "5s"
+          factor: 2
+
+      container:
+
+        image: marketplace-worker:v0.2.0
+
+        imagePullPolicy: IfNotPresent
+
+        command:
+          - /usr/local/bin/marketplace-worker
+
+        args:
+          - --operation=validate
+          - --failure-mode={{workflow.parameters.failureMode}}
+          - --attempt={{retries}}
+
+    # ==========================================
+    # Step 3 - Publish
+    # ==========================================
+
+    - name: publish
+
+      retryStrategy:
+
+        limit: "2"
+
+        retryPolicy: "OnFailure"
+
+        expression: "lastRetry.exitCode == '10'"
+
+        backoff:
+          duration: "5s"
+          factor: 2
+
+      container:
+
+        image: marketplace-worker:v0.2.0
+
+        imagePullPolicy: IfNotPresent
+
+        command:
+          - /usr/local/bin/marketplace-worker
+
+        args:
+          - --operation=publish
+          - --failure-mode={{workflow.parameters.failureMode}}
+          - --attempt={{retries}}

@@ -1,0 +1,37 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+
+metadata:
+  name: marketplace-image-validation
+  namespace: argo
+
+spec:
+  # Development schedule:
+  # every 5 minutes
+  schedules:
+    - "*/5 * * * *"
+
+  timezone: "America/Los_Angeles"
+
+  concurrencyPolicy: "Forbid"
+
+  suspend: false
+
+  startingDeadlineSeconds: 60
+
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 5
+
+  workflowMetadata:
+    labels:
+      marketplace.oracle.com/workflow-type: image-validation
+
+  workflowSpec:
+
+    arguments:
+      parameters:
+        - name: failureMode
+          value: success
+
+    workflowTemplateRef:
+      name: marketplace-image-validation

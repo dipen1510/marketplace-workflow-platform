@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Go
+*.test
+*.out
+coverage.out
+cover.out
+
+# Kubebuilder generated binaries
+controller/bin/
+
+# Local build output
+worker/bin/
+
+# Environment files
+.env
+.env.*
+
+# Logs
+*.log

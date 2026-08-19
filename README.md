@@ -1,697 +1,467 @@
 # Marketplace Workflow Platform
 
-A production-style workflow orchestration platform built with **Go**, **Kubernetes**, **Kubebuilder**, and **Argo Workflows**.
+A production-style Kubernetes workflow orchestration project built with **Go, Argo Workflows, Kubernetes, Kubebuilder, controller-runtime, client-go, and gRPC**.
 
-The project demonstrates how a custom Kubernetes controller can provide a domain-specific workflow API while delegating workflow scheduling and execution to Argo Workflows.
+The project demonstrates two different Kubernetes controller patterns:
 
-The controller manages the desired state of Marketplace workflows, while Argo handles scheduling, DAG execution, retries, concurrency, and worker pods.
+1. **Marketplace Workflow Controller** — manages desired workflow scheduling.
+2. **Marketplace Publishing Status Controller** — watches Argo Workflow executions and synchronizes workflow/step status to the Marketplace Publishing Service.
 
 ---
 
 ## Architecture
 
 ```text
-                       Kubernetes API Server
-                                |
-                                |
-                       MarketplaceWorkflow
-                         Custom Resource
-                                |
-                                | watch event
-                                v
-                     controller-runtime queue
-                                |
-                                v
-                         Go Controller
-                         Reconcile()
-                                |
-                    +-----------+------------+
-                    |                        |
-                    | validate               | create/update
-                    v                        v
-             WorkflowTemplate          CronWorkflow
-                (Argo)                    (Argo)
-                                             |
-                                             | cron schedule
-                                             |
-                                             v
-                                         Workflow
-                                      one execution/run
-                                             |
-                                             v
-                                      Argo DAG / Steps
-                                             |
-                                  +----------+----------+
-                                  |          |          |
-                                  v          v          v
-                              discover    validate    publish
-                                  |          |          |
-                                  +----------+----------+
-                                             |
-                                             v
-                                      Go Worker Pods
+                         CONTROL PLANE
+                         =============
+
+MarketplaceWorkflow CRD
+         |
+         | watch / reconcile
+         v
+Marketplace Workflow Controller
+         |
+         | Create / Update
+         v
+Argo CronWorkflow
+         |
+         | schedule fires
+         v
+
+
+                         EXECUTION PLANE
+                         ===============
+
+Argo Workflow
+      |
+      +---- discover
+      |
+      +---- validate
+      |
+      +---- publish
+      |
+      v
+Go CLI Worker
+      |
+      +---- Marketplace Publishing APIs
+      +---- Publisher APIs
+      +---- OCI internal service APIs
+
+
+                         STATUS PLANE
+                         ============
+
+Argo Workflow.status
+         |
+         | Kubernetes LIST / WATCH
+         v
+Shared Informer
+         |
+         v
+Informer Cache
+         |
+         | Add / Update / Delete event
+         v
+Typed Rate-Limiting WorkQueue
+         |
+         | namespace/workflow-name
+         v
+Worker Goroutines
+         |
+         v
+processNextWorkItem()
+         |
+         v
+syncWorkflow()
+         |
+         | read latest Workflow from cache
+         v
+JobStatus Mapper
+         |
+         | workflow + logical step status
+         v
+Marketplace Publishing gRPC Client
+         |
+         v
+Marketplace Publishing Service
+         |
+         v
+In-Memory Job Store
+         |
+         | Future phase
+         v
+OCI NoSQL
+TTL: 30-60 days
 ```
 
----
+### Workflow state
 
-## Core Design
-
-There are four important Kubernetes resources in the architecture.
-
-### MarketplaceWorkflow
-
-`MarketplaceWorkflow` is the domain-specific Custom Resource managed by this project.
-
-Example:
-
-```yaml
-apiVersion: workflow.marketplace.example.com/v1alpha1
-kind: MarketplaceWorkflow
-
-metadata:
-  name: publishing
-  namespace: argo
-
-spec:
-  schedules:
-    - "*/5 * * * *"
-
-  timezone: America/Los_Angeles
-
-  concurrencyPolicy: Forbid
-
-  suspend: false
-
-  workflowTemplateRef:
-    name: marketplace-publishing
-
-  parameters:
-    - name: failureMode
-      value: success
-```
-
-It describes **what Marketplace wants**, not how individual workflow steps are executed.
-
----
-
-### WorkflowTemplate
-
-The Argo `WorkflowTemplate` contains the reusable workflow implementation.
-
-For Publishing:
+Argo remains the source of truth for current workflow execution.
 
 ```text
-discover
+Argo Workflow
    |
-   v
-validate
+   +-- phase
+   +-- startedAt
+   +-- finishedAt
+   +-- message
    |
-   v
-publish
-```
-
-The template owns execution-specific configuration such as:
-
-- DAG dependencies
-- container images
-- commands
-- retry strategies
-- retry backoff
-- parameters
-- timeouts
-
-This keeps execution logic out of the custom Kubernetes controller.
-
----
-
-### CronWorkflow
-
-The custom controller reconciles a `MarketplaceWorkflow` into an Argo `CronWorkflow`.
-
-```text
-MarketplaceWorkflow
+   +-- nodes
         |
-        | Reconcile()
-        v
-CronWorkflow
+        +-- discover
+        +-- validate
+        +-- publish
+        +-- retry attempts
 ```
+
+The status controller converts Argo's internal node structure into a simpler Marketplace Publishing representation.
 
 For example:
 
 ```text
-MarketplaceWorkflow:
-schedule = */5 * * * *
+Argo
 
-             |
-             v
+validate Retry
+   |
+   +-- attempt 1 FAILED
+   +-- attempt 2 FAILED
+   +-- attempt 3 SUCCEEDED
 
-CronWorkflow:
-schedule = */5 * * * *
+              ↓
+
+Marketplace Publishing
+
+validate
+status   = SUCCEEDED
+attempts = 3
 ```
 
-The controller continuously ensures that the Argo resource matches the desired Marketplace configuration.
+The controller sends the **latest complete workflow snapshot** instead of trying to replay every Kubernetes event.
 
 ---
 
-### Workflow
-
-A `Workflow` represents **one execution**.
-
-For a workflow running every five minutes:
-
-```text
-CronWorkflow/publishing
-          |
-          +---- 10:00 → Workflow/publishing-a1
-          |
-          +---- 10:05 → Workflow/publishing-b2
-          |
-          +---- 10:10 → Workflow/publishing-c3
-```
-
-Argo, not the custom controller, creates these Workflow objects.
-
----
-
-## Controller Reconciliation
-
-The controller uses the standard Kubernetes reconciliation model.
-
-```text
-MarketplaceWorkflow event
-          |
-          v
-controller-runtime
-     work queue
-          |
-          v
-Reconcile(namespace/name)
-          |
-          v
-Get MarketplaceWorkflow
-          |
-          v
-Verify WorkflowTemplate
-          |
-     +----+----+
-     |         |
- missing      exists
-     |         |
-     v         v
- NotReady   Build desired
-             CronWorkflow
-                  |
-                  v
-          Create or Update
-                  |
-                  v
-             syncStatus()
-```
-
-The controller does **not** execute workflow steps.
-
-Its responsibility is maintaining desired state.
-
-Argo owns execution.
-
----
-
-## Reconciliation Queue
-
-`controller-runtime` watches Kubernetes resources and automatically maintains a work queue.
-
-For example:
-
-```text
-MarketplaceWorkflow/publishing updated
-MarketplaceWorkflow/promotion updated
-MarketplaceWorkflow/transfer updated
-
-                   |
-                   v
-
-          controller-runtime
-
-             Work Queue
-
-        +---------------------+
-        | argo/publishing     |
-        | argo/promotion      |
-        | argo/transfer       |
-        +---------------------+
-
-                   |
-                   v
-
-              Reconcile()
-```
-
-Each `Reconcile()` invocation receives one resource key:
-
-```go
-Request{
-    Namespace: "argo",
-    Name:      "publishing",
-}
-```
-
-The reconciler then reads the latest state from Kubernetes.
-
----
-
-## Self-Healing
-
-The controller continuously restores desired state.
-
-For example, suppose Marketplace declares:
-
-```text
-schedule = */5 * * * *
-```
-
-but somebody manually changes the generated Argo CronWorkflow:
-
-```text
-schedule = * * * * *
-```
-
-Because the controller watches the owned `CronWorkflow`:
-
-```text
-manual CronWorkflow update
-          |
-          v
-Kubernetes event
-          |
-          v
-controller-runtime queue
-          |
-          v
-Reconcile()
-          |
-          v
-restore */5 * * * *
-```
-
-The same mechanism can recreate a deleted child CronWorkflow.
-
----
-
-## Status Synchronization
-
-Desired configuration flows downward:
-
-```text
-MarketplaceWorkflow.spec
-          |
-          v
-       Reconcile
-          |
-          v
-CronWorkflow.spec
-```
-
-Observed state flows upward:
-
-```text
-CronWorkflow.status
-          |
-          v
-      syncStatus()
-          |
-          v
-MarketplaceWorkflow.status
-```
-
-Example:
-
-```yaml
-status:
-  phase: Ready
-
-  cronWorkflowName: publishing
-
-  activeRuns: 1
-
-  succeededRuns: 27
-
-  failedRuns: 2
-
-  observedGeneration: 4
-```
-
-If reconciliation cannot succeed, the controller reports the problem through Kubernetes conditions:
-
-```yaml
-status:
-  phase: NotReady
-
-  conditions:
-    - type: Ready
-      status: "False"
-      reason: WorkflowTemplateNotFound
-```
-
----
-
-## Retry and Failure Handling
-
-Worker processes classify failures using explicit exit codes.
-
-| Exit Code | Failure Type | Retry |
-|---|---|---|
-| `0` | Success | No |
-| `10` | Transient | Yes |
-| `20` | Permanent | No |
-| `30` | Validation | No |
-
-Example Argo retry policy:
-
-```yaml
-retryStrategy:
-  limit: "2"
-
-  retryPolicy: OnFailure
-
-  expression: "lastRetry.exitCode == '10'"
-
-  backoff:
-    duration: "5s"
-    factor: 2
-```
-
-This keeps business failure classification inside Go while allowing Argo to manage retries and backoff.
-
----
-
-## Project Structure
+## Repository Structure
 
 ```text
 marketplace-workflow-platform/
-
+│
 ├── argo/
 │   ├── templates/
-│   │   └── publishing.yaml
-│   │
 │   └── cron/
 │
 ├── worker/
-│   ├── cmd/
-│   │   └── worker/
-│   │       └── main.go
-│   │
-│   ├── internal/
-│   │   └── workflow/
-│   │
-│   ├── Dockerfile
-│   └── go.mod
+│   └── Go CLI commands executed by Argo
 │
-└── controller/
+├── controller/
+│   └── MarketplaceWorkflow scheduling controller
+│
+└── publishing-status-controller/
+    │
     ├── api/
-    │   └── v1alpha1/
-    │
-    ├── internal/
-    │   └── controller/
-    │
-    ├── config/
+    │   ├── publishing.proto
+    │   ├── publishing.pb.go
+    │   └── publishing_grpc.pb.go
     │
     ├── cmd/
-    │   └── main.go
+    │   ├── controller/
+    │   │   └── main.go
+    │   │
+    │   └── publishing-service/
+    │       └── main.go
     │
-    ├── Makefile
-    └── go.mod
+    └── internal/
+        ├── controller/
+        │   ├── controller.go
+        │   └── mapper.go
+        │
+        ├── model/
+        │   └── status.go
+        │
+        └── publishing/
+            ├── client.go
+            ├── mapper.go
+            └── service.go
 ```
 
 ---
 
-## Technology Stack
+# Running Locally
 
-- Go
-- Kubernetes
-- Kubebuilder
-- controller-runtime
-- Argo Workflows
-- Docker
-- Kind
-- Custom Resource Definitions
-- Kubernetes owner references
-- envtest / Ginkgo / Gomega
+The examples assume:
 
----
+- Docker Desktop is running
+- Kind cluster is running
+- Argo Workflows is installed
+- Kubernetes context is configured
+- namespace is `argo`
 
-## Local Development
-
-### Requirements
-
-Install:
-
-```text
-Docker Desktop
-kubectl
-kind
-Go
-Kubebuilder
-Argo CLI
-```
-
----
-
-### Create the Kind Cluster
+Verify the cluster:
 
 ```bash
-kind create cluster \
-  --name marketplace-workflows
+kubectl cluster-info
 ```
 
-Verify:
-
-```bash
-kubectl cluster-info \
-  --context kind-marketplace-workflows
-```
-
----
-
-### Install Argo Workflows
-
-Install a compatible Argo Workflows release into the `argo` namespace.
-
-Verify:
+Verify Argo:
 
 ```bash
 kubectl get pods -n argo
 ```
 
-and:
+Verify the publishing template:
 
 ```bash
-kubectl get crd | grep argoproj
+kubectl get workflowtemplate marketplace-publishing -n argo
+```
+
+If needed, apply it:
+
+```bash
+kubectl apply -f argo/templates/publishing.yaml
 ```
 
 ---
 
-### Build the Marketplace Worker
+## 1. Run Marketplace Publishing Service
+
+Open terminal 1:
 
 ```bash
-cd worker
+cd publishing-status-controller
 
-docker build \
-  -t marketplace-worker:v0.2.0 .
+go run ./cmd/publishing-service
 ```
 
-Load it into Kind:
+Expected:
+
+```text
+Marketplace Publishing Service listening on :50051
+```
+
+The service currently stores workflow status in memory.
+
+A future phase will replace the in-memory repository with OCI NoSQL using a 30-60 day TTL.
+
+---
+
+## 2. Run Marketplace Publishing Status Controller
+
+Open terminal 2:
 
 ```bash
-kind load docker-image \
-  marketplace-worker:v0.2.0 \
-  --name marketplace-workflows
+cd publishing-status-controller
+
+go run ./cmd/controller
+```
+
+The controller performs:
+
+```text
+Workflow event
+      ↓
+Informer
+      ↓
+TypedRateLimitingQueue
+      ↓
+Worker
+      ↓
+syncWorkflow()
+      ↓
+Informer Cache
+      ↓
+JobStatus
+      ↓
+gRPC
+      ↓
+Marketplace Publishing Service
+```
+
+Existing Workflows may generate `ADD` events when the informer initially synchronizes its cache.
+
+---
+
+# Success Scenario
+
+Open terminal 3.
+
+Submit the publishing workflow:
+
+```bash
+argo submit \
+  --from workflowtemplate/marketplace-publishing \
+  -n argo \
+  -p failureMode=success
+```
+
+Watch the workflow:
+
+```bash
+argo list -n argo
+```
+
+or:
+
+```bash
+argo get <workflow-name> -n argo
+```
+
+The status controller should observe transitions such as:
+
+```text
+PENDING
+   ↓
+RUNNING
+   ↓
+SUCCEEDED
+```
+
+The Marketplace Publishing Service will receive snapshots similar to:
+
+```text
+workflow = marketplace-publishing-xxxxx
+phase    = SUCCEEDED
+
+discover  SUCCEEDED
+validate  SUCCEEDED
+publish   SUCCEEDED
 ```
 
 ---
 
-### Install the Marketplace CRD
-
-```bash
-cd controller
-
-make manifests
-make install
-```
-
-Verify:
-
-```bash
-kubectl get crd | grep marketplaceworkflow
-```
-
----
-
-### Run Controller Locally
-
-```bash
-make run
-```
-
-The controller uses your current Kubernetes context.
-
----
-
-### Install the Argo WorkflowTemplate
-
-From the project root:
-
-```bash
-kubectl apply \
-  -f argo/templates/publishing.yaml
-```
-
-Verify:
-
-```bash
-kubectl get workflowtemplates -n argo
-```
-
----
-
-### Create MarketplaceWorkflow
-
-```bash
-kubectl apply \
-  -f controller/config/samples/publishing.yaml
-```
-
-Verify the custom resource:
-
-```bash
-kubectl get marketplaceworkflows -n argo
-```
-
-Then verify the controller-generated Argo CronWorkflow:
-
-```bash
-kubectl get cronworkflows -n argo
-```
-
----
-
-## Testing
-
-The controller uses Kubernetes `envtest`.
+# Workflow Retry Scenario
 
 Run:
 
 ```bash
-cd controller
-
-make test
+argo submit \
+  --from workflowtemplate/marketplace-publishing \
+  -n argo \
+  -p failureMode=transient
 ```
 
-The test environment starts a lightweight Kubernetes API server and etcd instance and installs the required CRDs.
+The validation step intentionally fails transiently before succeeding.
 
-The controller tests cover reconciliation behavior such as:
-
-- resource creation
-- desired-state updates
-- missing WorkflowTemplates
-- status synchronization
-- owner references
-- manual drift repair
-- child recreation
-
----
-
-## Kubernetes State
-
-Kubernetes remains the source of truth for active orchestration state.
+Argo may execute:
 
 ```text
-Kubernetes API Server
-        |
-        v
-       etcd
-
-        |
-        +-- MarketplaceWorkflow
-        |
-        +-- CronWorkflow
-        |
-        +-- Workflow
-        |
-        +-- Pod
+validate
+   |
+   +-- attempt 1 FAILED
+   +-- attempt 2 FAILED
+   +-- attempt 3 SUCCEEDED
 ```
 
-The controller never talks directly to etcd.
-
-It interacts with Kubernetes through the API server and controller-runtime client/cache.
-
-Long-term workflow history or analytics can later be stored separately using Argo Workflow Archive or another external datastore.
-
----
-
-## Design Principles
-
-The project intentionally follows several Kubernetes controller principles:
-
-- Declarative desired state
-- Idempotent reconciliation
-- Event-driven reconciliation
-- Self-healing resources
-- Clear resource ownership
-- Separation of control plane and execution plane
-- Kubernetes as the active state source of truth
-- Argo as the workflow execution engine
-
----
-
-## Current Status
-
-Implemented:
-
-- Custom `MarketplaceWorkflow` CRD
-- Go/Kubebuilder controller
-- Argo `CronWorkflow` reconciliation
-- WorkflowTemplate validation
-- Marketplace status synchronization
-- Owner references
-- Workflow retry classification
-- Go worker containers
-- Publishing DAG
-- Local Kind development environment
-- envtest controller testing
-
-Planned production hardening:
-
-- WorkflowTemplate event indexing/watch improvements
-- Additional reconciliation predicates
-- Kubernetes Events
-- Prometheus controller metrics
-- Configurable reconciliation concurrency
-- Leader election / HA
-- Controller Docker image
-- Kubernetes Deployment and RBAC hardening
-- End-to-end tests
-- Argo workflow archival
-
----
-
-## Goal
-
-The goal of this project is to demonstrate how a domain-specific workflow platform can be built on Kubernetes without reimplementing a workflow engine.
-
-The custom controller owns Marketplace-specific policy and desired state, while Argo Workflows owns scheduling and execution.
+The Marketplace Publishing status controller exposes this as one logical step:
 
 ```text
-Marketplace business policy
-          |
-          v
-MarketplaceWorkflow
-          |
-          v
-Custom Kubernetes Controller
-          |
-          v
-Argo Workflows
-          |
-          v
-Go Workers
+validate
+phase    = SUCCEEDED
+attempts = 3
 ```
+
+This prevents individual retry failures from incorrectly being treated as final workflow failures.
+
+---
+
+# Publishing Service Failure / Controller Retry Scenario
+
+This demonstrates why the controller uses a **Typed Rate-Limiting WorkQueue**.
+
+First keep the status controller running.
+
+Stop the Marketplace Publishing Service:
+
+```text
+Ctrl+C
+```
+
+Then submit another workflow:
+
+```bash
+argo submit \
+  --from workflowtemplate/marketplace-publishing \
+  -n argo \
+  -p failureMode=success
+```
+
+The workflow continues running in Argo, but status synchronization fails:
+
+```text
+Workflow
+   ↓
+Status Controller
+   ↓
+gRPC
+   X
+Marketplace Publishing unavailable
+```
+
+The controller returns an error and requeues the workflow using:
+
+```text
+AddRateLimited(key)
+```
+
+Retries use exponential backoff approximately like:
+
+```text
+1 second
+2 seconds
+4 seconds
+8 seconds
+16 seconds
+...
+```
+
+Restart the service:
+
+```bash
+go run ./cmd/publishing-service
+```
+
+A subsequent retry reads the **latest Workflow state from the informer cache** and successfully synchronizes it.
+
+```text
+Marketplace Publishing unavailable
+          ↓
+AddRateLimited()
+          ↓
+retry with backoff
+          ↓
+Marketplace Publishing recovers
+          ↓
+sync latest Workflow
+          ↓
+success
+          ↓
+queue.Forget(key)
+```
+
+---
+
+## Current Persistence
+
+Current/recent workflow execution state:
+
+```text
+Argo Workflow
+      ↓
+Kubernetes API
+      ↓
+etcd
+```
+
+Marketplace Publishing history currently uses an in-memory store.
+
+Future production persistence:
+
+```text
+Marketplace Publishing Service
+          ↓
+OCI NoSQL
+          ↓
+workflowUID -> JobStatus
+          ↓
+TTL 30-60 days
+```
+
+Argo/Kubernetes remains the source of truth for active execution. OCI NoSQL will provide longer-lived Marketplace operational history.

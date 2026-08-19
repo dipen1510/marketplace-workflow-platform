@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package marketplace.publishing.v1;
+
+option go_package =
+  "github.com/dipen1510/marketplace-workflow-platform/publishing-status-controller/api;publishingv1";
+
+import "google/protobuf/timestamp.proto";
+
+service MarketplacePublishingService {
+
+  rpc UpdateJobStatus(
+    UpdateJobStatusRequest
+  ) returns (
+    UpdateJobStatusResponse
+  );
+}
+
+message UpdateJobStatusRequest {
+  JobStatus job = 1;
+}
+
+message UpdateJobStatusResponse {
+  bool updated = 1;
+}
+
+message JobStatus {
+  string workflow_uid = 1;
+  string workflow_name = 2;
+  string namespace = 3;
+
+  string resource_version = 4;
+
+  JobPhase phase = 5;
+
+  string message = 6;
+
+  google.protobuf.Timestamp started_at = 7;
+  google.protobuf.Timestamp finished_at = 8;
+
+  repeated StepStatus steps = 9;
+}
+
+message StepStatus {
+  string node_id = 1;
+  string name = 2;
+
+  JobPhase phase = 3;
+
+  string message = 4;
+
+  google.protobuf.Timestamp started_at = 5;
+  google.protobuf.Timestamp finished_at = 6;
+
+  int32 attempts = 7;
+}
+
+enum JobPhase {
+  JOB_PHASE_UNSPECIFIED = 0;
+
+  JOB_PHASE_PENDING = 1;
+  JOB_PHASE_RUNNING = 2;
+  JOB_PHASE_SUCCEEDED = 3;
+  JOB_PHASE_FAILED = 4;
+  JOB_PHASE_ERROR = 5;
+  JOB_PHASE_SKIPPED = 6;
+  JOB_PHASE_OMITTED = 7;
+}

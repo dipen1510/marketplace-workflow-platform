@@ -3,53 +3,31 @@ package main
 import (
 	"fmt"
 	"log"
-	"net"
+	"net/http"
 
-	publishingv1 "github.com/dipen1510/marketplace-workflow-platform/publishing-status-controller/api"
 	"github.com/dipen1510/marketplace-workflow-platform/publishing-status-controller/internal/publishing"
-
-	"google.golang.org/grpc"
 )
 
 func main() {
+	address := ":8080"
 
-	address := ":50051"
+	service := publishing.NewService()
 
-	listener, err :=
-		net.Listen(
-			"tcp",
-			address,
-		)
-
-	if err != nil {
-		log.Fatalf(
-			"failed to listen: %v",
-			err,
-		)
+	server := &http.Server{
+		Addr:    address,
+		Handler: service.Handler(),
 	}
 
-	grpcServer :=
-		grpc.NewServer()
-
-	service :=
-		publishing.NewService()
-
-	publishingv1.
-		RegisterMarketplacePublishingServiceServer(
-			grpcServer,
-			service,
-		)
-
 	fmt.Printf(
-		"Marketplace Publishing Service listening on %s\n",
+		"Marketplace Publishing REST Service listening on %s\n",
 		address,
 	)
 
-	if err :=
-		grpcServer.Serve(listener); err != nil {
+	if err := server.ListenAndServe(); err != nil &&
+		err != http.ErrServerClosed {
 
 		log.Fatalf(
-			"gRPC server failed: %v",
+			"REST server failed: %v",
 			err,
 		)
 	}

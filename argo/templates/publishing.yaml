@@ -21,6 +21,49 @@ spec:
 
     - name: publishing
 
+      metrics:
+      prometheus:
+
+      # ------------------------------------------
+      # Overall workflow result
+      # ------------------------------------------
+        - name: marketplace_workflow_result_total
+
+          help: "Total Marketplace workflows by final result"
+
+          labels:
+            - key: workflow_type
+              value: publishing
+
+            - key: status
+              value: "{{status}}"
+
+          counter:
+            value: "1"
+
+      # ------------------------------------------
+      # Overall workflow duration
+      # ------------------------------------------
+        - name: marketplace_workflow_duration_seconds
+
+          help: "Marketplace workflow execution duration in seconds"
+
+          labels:
+            - key: workflow_type
+              value: publishing
+
+          histogram:
+
+            buckets:
+              - 10
+              - 30
+              - 60
+              - 120
+              - 300
+              - 600
+
+            value: "{{duration}}"
+
       dag:
         tasks:
 
@@ -42,6 +85,51 @@ spec:
     # ==========================================
 
     - name: discover
+
+      metrics:
+      prometheus:
+
+        - name: marketplace_workflow_step_result_total
+
+          help: "Total Marketplace workflow step executions by result"
+
+          labels:
+            - key: workflow_type
+              value: publishing
+
+            - key: step
+              value: discover
+
+            - key: status
+              value: "{{status}}"
+
+          counter:
+            value: "1"
+
+        - name: marketplace_workflow_step_duration_seconds
+
+          help: "Marketplace workflow step execution duration in seconds"
+
+          labels:
+            - key: workflow_type
+              value: publishing
+
+            - key: step
+              value: discover
+
+          histogram:
+
+            buckets:
+              - 1
+              - 5
+              - 10
+              - 30
+              - 60
+              - 120
+              - 300
+
+            value: "{{duration}}"
+
 
       container:
 
@@ -76,6 +164,73 @@ spec:
           duration: "5s"
           factor: 2
 
+      metrics:
+      prometheus:
+
+      # ------------------------------------------
+      # Logical final status of validate
+      # ------------------------------------------
+        - name: marketplace_workflow_step_result_total
+
+          help: "Total Marketplace workflow step executions by result"
+
+          labels:
+            - key: workflow_type
+              value: publishing
+
+            - key: step
+              value: validate
+
+            - key: status
+              value: "{{status}}"
+
+          counter:
+            value: "1"
+
+      # ------------------------------------------
+      # Number of retries used
+      # ------------------------------------------
+        - name: marketplace_workflow_step_retry_total
+
+          help: "Total Marketplace workflow step retries"
+
+          labels:
+            - key: workflow_type
+              value: publishing
+
+            - key: step
+              value: validate
+
+          counter:
+            value: "{{retries}}"
+
+      # ------------------------------------------
+      # Logical step duration
+      # ------------------------------------------
+        - name: marketplace_workflow_step_duration_seconds
+
+          help: "Marketplace workflow step execution duration in seconds"
+
+          labels:
+            - key: workflow_type
+              value: publishing
+
+            - key: step
+              value: validate
+
+          histogram:
+
+            buckets:
+              - 1
+              - 5
+              - 10
+              - 30
+              - 60
+              - 120
+              - 300
+
+            value: "{{duration}}"
+
       container:
 
         image: marketplace-worker:v0.2.0
@@ -107,6 +262,65 @@ spec:
         backoff:
           duration: "5s"
           factor: 2
+
+      metrics:
+      prometheus:
+
+        - name: marketplace_workflow_step_result_total
+
+          help: "Total Marketplace workflow step executions by result"
+
+          labels:
+            - key: workflow_type
+              value: publishing
+
+            - key: step
+              value: publish
+
+            - key: status
+              value: "{{status}}"
+
+          counter:
+            value: "1"
+
+        - name: marketplace_workflow_step_retry_total
+
+          help: "Total Marketplace workflow step retries"
+
+          labels:
+            - key: workflow_type
+              value: publishing
+
+            - key: step
+              value: publish
+
+          counter:
+            value: "{{retries}}"
+
+        - name: marketplace_workflow_step_duration_seconds
+
+          help: "Marketplace workflow step execution duration in seconds"
+
+          labels:
+            - key: workflow_type
+              value: publishing
+
+            - key: step
+              value: publish
+
+          histogram:
+
+            buckets:
+              - 1
+              - 5
+              - 10
+              - 30
+              - 60
+              - 120
+              - 300
+
+            value: "{{duration}}"
+
 
       container:
 

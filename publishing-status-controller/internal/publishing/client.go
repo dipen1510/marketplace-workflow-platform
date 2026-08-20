@@ -1,62 +1,73 @@
 package publishing
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
-	publishingv1 "github.com/dipen1510/marketplace-workflow-platform/publishing-status-controller/api"
+	"github.com/dipen1510/marketplace-workflow-platform/publishing-status-controller/internal/metrics"
 	"github.com/dipen1510/marketplace-workflow-platform/publishing-status-controller/internal/model"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 type Client struct {
-	conn *grpc.ClientConn
+	baseURL    string
+	httpClient *http.Client
+	metrics    *metrics.Recorder
+}
 
-	client publishingv1.
-		MarketplacePublishingServiceClient
+type HTTPError struct {
+	StatusCode int
+	Body       string
+}
 
-	timeout time.Duration
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf(
+		"publishing status API returned HTTP %d: %s",
+		e.StatusCode,
+		e.Body,
+	)
+}
+
+func (e *HTTPError) Retryable() bool {
+	return e.StatusCode == http.StatusTooManyRequests ||
+		e.StatusCode >= http.StatusInternalServerError
 }
 
 func NewClient(
-	address string,
+	baseURL string,
 	timeout time.Duration,
+	recorder *metrics.Recorder,
 ) (*Client, error) {
 
-	conn, err :=
-		grpc.NewClient(
-			address,
-			grpc.WithTransportCredentials(
-				insecure.NewCredentials(),
-			),
+	parsed, err := url.Parse(baseURL)
+	if err != nil ||
+		parsed.Scheme == "" ||
+		parsed.Host == "" {
+
+		return nil, fmt.Errorf(
+			"invalid publishing base URL %q",
+			baseURL,
 		)
-
-	if err != nil {
-
-		return nil,
-			fmt.Errorf(
-				"create publishing gRPC client: %w",
-				err,
-			)
 	}
 
 	return &Client{
-		conn: conn,
+		baseURL: strings.TrimRight(
+			baseURL,
+			"/",
+		),
 
-		client: publishingv1.
-			NewMarketplacePublishingServiceClient(
-				conn,
-			),
+		httpClient: &http.Client{
+			Timeout: timeout,
+		},
 
-		timeout: timeout,
+		metrics: recorder,
 	}, nil
-}
-
-func (c *Client) Close() error {
-	return c.conn.Close()
 }
 
 func (c *Client) UpdateJobStatus(
@@ -64,50 +75,93 @@ func (c *Client) UpdateJobStatus(
 	job model.JobStatus,
 ) error {
 
-	rpcCtx, cancel :=
-		context.WithTimeout(
-			ctx,
-			c.timeout,
-		)
-
-	defer cancel()
-
-	request :=
-		&publishingv1.
-			UpdateJobStatusRequest{
-			Job: toProtoJob(job),
-		}
-
-	response, err :=
-		c.client.
-			UpdateJobStatus(
-				rpcCtx,
-				request,
-			)
-
+	payload, err := json.Marshal(job)
 	if err != nil {
-
 		return fmt.Errorf(
-			"UpdateJobStatus workflow=%s: %w",
+			"marshal workflow status %s: %w",
 			job.WorkflowName,
 			err,
 		)
 	}
 
-	if !response.GetUpdated() {
+	endpoint := fmt.Sprintf(
+		"%s/v1/workflows/%s/status",
+		c.baseURL,
+		url.PathEscape(job.WorkflowUID),
+	)
 
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPut,
+		endpoint,
+		bytes.NewReader(payload),
+	)
+
+	if err != nil {
 		return fmt.Errorf(
-			"publishing service did not update workflow=%s",
-			job.WorkflowName,
+			"create publishing status request: %w",
+			err,
 		)
 	}
 
-	fmt.Printf(
-		"[GRPC] synchronized workflow=%s phase=%s resourceVersion=%s\n",
-		job.WorkflowName,
-		job.Phase,
-		job.ResourceVersion,
+	req.Header.Set(
+		"Content-Type",
+		"application/json",
 	)
 
-	return nil
+	started := time.Now()
+
+	resp, err := c.httpClient.Do(req)
+
+	if err != nil {
+		c.metrics.ObserveHTTPRequest(
+			"transport_error",
+			time.Since(started),
+		)
+
+		return fmt.Errorf(
+			"update workflow status %s: %w",
+			job.WorkflowName,
+			err,
+		)
+	}
+
+	defer resp.Body.Close()
+
+	statusClass := fmt.Sprintf(
+		"%dxx",
+		resp.StatusCode/100,
+	)
+
+	c.metrics.ObserveHTTPRequest(
+		statusClass,
+		time.Since(started),
+	)
+
+	if resp.StatusCode >= 200 &&
+		resp.StatusCode < 300 {
+
+		fmt.Printf(
+			"[REST] synchronized workflow=%s phase=%s resourceVersion=%s\n",
+			job.WorkflowName,
+			job.Phase,
+			job.ResourceVersion,
+		)
+
+		return nil
+	}
+
+	body, _ := io.ReadAll(
+		io.LimitReader(
+			resp.Body,
+			4096,
+		),
+	)
+
+	return &HTTPError{
+		StatusCode: resp.StatusCode,
+		Body: strings.TrimSpace(
+			string(body),
+		),
+	}
 }

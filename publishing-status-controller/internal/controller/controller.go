@@ -3,11 +3,14 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	wfv1 "github.com/argoproj/argo-workflows/v4/pkg/apis/workflow/v1alpha1"
+	"github.com/dipen1510/marketplace-workflow-platform/publishing-status-controller/internal/metrics"
 	"github.com/dipen1510/marketplace-workflow-platform/publishing-status-controller/internal/model"
+	"github.com/dipen1510/marketplace-workflow-platform/publishing-status-controller/internal/publishing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 )
@@ -25,9 +28,10 @@ type Controller struct {
 	informer  cache.SharedIndexInformer
 	queue     workqueue.TypedRateLimitingInterface[string]
 	publisher StatusPublisher
+	metrics   *metrics.Recorder
 }
 
-func New(informer cache.SharedIndexInformer, publisher StatusPublisher) (*Controller, error) {
+func New(informer cache.SharedIndexInformer, publisher StatusPublisher, recorder *metrics.Recorder) (*Controller, error) {
 	rateLimiter :=
 		workqueue.
 			NewTypedItemExponentialFailureRateLimiter[string](
@@ -43,6 +47,7 @@ func New(informer cache.SharedIndexInformer, publisher StatusPublisher) (*Contro
 		informer:  informer,
 		queue:     queue,
 		publisher: publisher,
+		metrics:   recorder,
 	}
 
 	_, err := informer.AddEventHandler(
@@ -64,6 +69,7 @@ func (c *Controller) addWorkflow(obj interface{}) {
 	if !ok {
 		return
 	}
+	c.metrics.Event("add")
 
 	fmt.Printf(
 		"[Event ADD] workflow=%s namespace=%s phase=%s\n",
@@ -87,6 +93,7 @@ func (c *Controller) updateWorkflow(
 	if !ok {
 		return
 	}
+	c.metrics.Event("update")
 
 	fmt.Printf(
 		"[EVENT UPDATE] workflow=%s phase=%s -> %s\n",
@@ -111,6 +118,7 @@ func (c *Controller) deleteWorkflow(obj interface{}) {
 
 		return
 	}
+	c.metrics.Event("delete")
 
 	fmt.Printf(
 		"[EVENT DELETE] key=%s\n",
@@ -118,6 +126,9 @@ func (c *Controller) deleteWorkflow(obj interface{}) {
 	)
 
 	c.queue.Add(key)
+	c.metrics.SetQueueDepth(
+		c.queue.Len(),
+	)
 }
 
 func (c *Controller) enqueue(
@@ -143,6 +154,9 @@ func (c *Controller) enqueue(
 	)
 
 	c.queue.Add(key)
+	c.metrics.SetQueueDepth(
+		c.queue.Len(),
+	)
 }
 
 func (c *Controller) Run(
@@ -162,6 +176,9 @@ func (c *Controller) Run(
 		)
 
 		c.queue.ShutDown()
+		c.metrics.SetQueueDepth(
+			c.queue.Len(),
+		)
 	}()
 
 	for i := 0; i < workers; i++ {
@@ -229,11 +246,41 @@ func (c *Controller) processNextWorkItem(
 	if err == nil {
 
 		c.queue.Forget(key)
+		c.metrics.Sync(
+			"success",
+		)
 
 		fmt.Printf(
 			"[WORKER %d] success key=%s\n",
 			workerID,
 			key,
+		)
+
+		return true
+	}
+
+	var httpErr *publishing.HTTPError
+
+	if errors.As(
+		err,
+		&httpErr,
+	) &&
+		!httpErr.Retryable() {
+
+		c.metrics.Sync(
+			"failure",
+		)
+
+		c.metrics.Dropped()
+
+		c.queue.Forget(key)
+
+		fmt.Printf(
+			"[WORKER %d] permanent sync failure key=%s status=%d error=%v\n",
+			workerID,
+			key,
+			httpErr.StatusCode,
+			err,
 		)
 
 		return true
@@ -252,11 +299,18 @@ func (c *Controller) processNextWorkItem(
 		)
 
 		c.queue.AddRateLimited(key)
+		c.metrics.Retry()
+
+		c.queue.
+			AddRateLimited(
+				key,
+			)
 
 		return true
 	}
 
 	// Too many failures.
+	c.metrics.Dropped()
 	c.queue.Forget(key)
 
 	fmt.Printf(

@@ -15,8 +15,12 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"net/http"
+
 	"github.com/dipen1510/marketplace-workflow-platform/publishing-status-controller/internal/controller"
 	"github.com/dipen1510/marketplace-workflow-platform/publishing-status-controller/internal/publishing"
+
+	"github.com/dipen1510/marketplace-workflow-platform/publishing-status-controller/internal/metrics"
 )
 
 func main() {
@@ -26,26 +30,36 @@ func main() {
 		defaultKubeconfig(),
 		"path to kubeconfig",
 	)
-	publishingAddress :=
+	publishingURL :=
 		flag.String(
-			"publishing-address",
-			"localhost:50051",
-			"Marketplace Publishing gRPC address",
+			"publishing-url",
+			"http://localhost:8080",
+			"Marketplace Publishing REST API base URL",
 		)
 
-	rpcTimeout :=
+	httpTimeout :=
 		flag.Duration(
-			"rpc-timeout",
+			"http-timeout",
 			3*time.Second,
-			"Marketplace Publishing RPC timeout",
+			"Marketplace Publishing HTTP timeout",
+		)
+
+	metricsAddress :=
+		flag.String(
+			"metrics-address",
+			":9090",
+			"Prometheus metrics listen address",
 		)
 
 	flag.Parse()
+	metricsRecorder :=
+		metrics.NewRecorder()
 
 	publishingClient, err :=
 		publishing.NewClient(
-			*publishingAddress,
-			*rpcTimeout,
+			*publishingURL,
+			*httpTimeout,
+			metricsRecorder,
 		)
 
 	if err != nil {
@@ -58,8 +72,6 @@ func main() {
 
 		os.Exit(1)
 	}
-
-	defer publishingClient.Close()
 
 	ctx, cancel := signal.NotifyContext(
 		context.Background(),
@@ -95,6 +107,44 @@ func main() {
 
 		os.Exit(1)
 	}
+	metricsMux :=
+		http.NewServeMux()
+
+	metricsMux.Handle(
+		"/metrics",
+		metricsRecorder.Handler(),
+	)
+
+	metricsServer :=
+		&http.Server{
+			Addr: *metricsAddress,
+
+			Handler: metricsMux,
+		}
+
+	go func() {
+
+		fmt.Printf(
+			"Prometheus metrics listening on %s/metrics\n",
+			*metricsAddress,
+		)
+
+		err :=
+			metricsServer.
+				ListenAndServe()
+
+		if err != nil &&
+			err != http.ErrServerClosed {
+
+			fmt.Fprintf(
+				os.Stderr,
+				"metrics server failed: %v\n",
+				err,
+			)
+
+			cancel()
+		}
+	}()
 	// Watch only the Argo namespace.
 	informerFactory :=
 		wfinformers.NewSharedInformerFactoryWithOptions(
@@ -114,6 +164,7 @@ func main() {
 		controller.New(
 			workflowInformer,
 			publishingClient,
+			metricsRecorder,
 		)
 
 	if err != nil {

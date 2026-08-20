@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: marketplace-status-controller
+  namespace: marketplace-system
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: marketplace-status-controller
+
+  template:
+
+    metadata:
+      labels:
+        app: marketplace-status-controller
+
+    spec:
+
+      serviceAccountName:
+        marketplace-status-controller
+
+      containers:
+
+        - name: status-controller
+
+          image: marketplace-status-controller:v0.1.0
+
+          imagePullPolicy: IfNotPresent
+
+          args:
+
+            - --namespace=argo
+
+            - --publishing-url=http://marketplace-publishing-service.marketplace-system.svc.cluster.local:8080
+
+            - --http-timeout=3s
+
+            - --metrics-address=:9090
+
+          ports:
+
+            - name: metrics
+              containerPort: 9090

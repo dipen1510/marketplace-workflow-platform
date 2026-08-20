@@ -1,0 +1,29 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+
+metadata:
+  name: argo-workflow-controller
+  namespace: monitoring
+
+spec:
+
+  namespaceSelector:
+    matchNames:
+      - argo
+
+  selector:
+    matchLabels:
+      monitoring: marketplace
+
+  endpoints:
+
+    - port: metrics
+
+      path: /metrics
+
+      interval: 15s
+
+      scheme: https
+
+      tlsConfig:
+        insecureSkipVerify: true

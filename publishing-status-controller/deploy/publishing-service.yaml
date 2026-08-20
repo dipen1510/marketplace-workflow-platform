@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: marketplace-publishing-service
+  namespace: marketplace-system
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: marketplace-publishing-service
+
+  template:
+
+    metadata:
+      labels:
+        app: marketplace-publishing-service
+
+    spec:
+
+      containers:
+
+        - name: publishing-service
+
+          image: marketplace-publishing-service:v0.1.0
+
+          imagePullPolicy: IfNotPresent
+
+          ports:
+
+            - name: http
+              containerPort: 8080
+
+---
+
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: marketplace-publishing-service
+  namespace: marketplace-system
+
+spec:
+
+  selector:
+    app: marketplace-publishing-service
+
+  ports:
+
+    - name: http
+      port: 8080
+      targetPort: 8080

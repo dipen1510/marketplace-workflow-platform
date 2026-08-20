@@ -12,6 +12,7 @@ import (
 
 	wfclientset "github.com/argoproj/argo-workflows/v4/pkg/client/clientset/versioned"
 	wfinformers "github.com/argoproj/argo-workflows/v4/pkg/client/informers/externalversions"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 
@@ -27,7 +28,7 @@ func main() {
 	namespace := flag.String("namespace", "argo", "namespace containing Argo Workflos")
 	kubeconfig := flag.String(
 		"kubeconfig",
-		defaultKubeconfig(),
+		"",
 		"path to kubeconfig",
 	)
 	publishingURL :=
@@ -84,6 +85,20 @@ func main() {
 			"",
 			*kubeconfig,
 		)
+
+	config, err = buildKubeConfig(
+		*kubeconfig,
+	)
+
+	if err != nil {
+		fmt.Fprintf(
+			os.Stderr,
+			"failed to create Kubernetes config: %v\n",
+			err,
+		)
+
+		os.Exit(1)
+	}
 
 	if err != nil {
 		fmt.Fprintf(
@@ -233,5 +248,29 @@ func defaultKubeconfig() string {
 		homeDir,
 		".kube",
 		"config",
+	)
+}
+
+func buildKubeConfig(
+	kubeconfig string,
+) (*rest.Config, error) {
+
+	// Explicit kubeconfig always wins.
+	if kubeconfig != "" {
+		return clientcmd.BuildConfigFromFlags(
+			"",
+			kubeconfig,
+		)
+	}
+
+	// Running inside Kubernetes.
+	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		return rest.InClusterConfig()
+	}
+
+	// Local development fallback.
+	return clientcmd.BuildConfigFromFlags(
+		"",
+		defaultKubeconfig(),
 	)
 }

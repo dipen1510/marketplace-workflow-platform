@@ -1,0 +1,23 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+
+metadata:
+  name: marketplace-status-controller
+  namespace: monitoring
+
+spec:
+
+  namespaceSelector:
+    matchNames:
+      - marketplace-system
+
+  selector:
+    matchLabels:
+      monitoring: marketplace
+
+  endpoints:
+
+    - port: metrics
+      path: /metrics
+      interval: 15s
+      scheme: http

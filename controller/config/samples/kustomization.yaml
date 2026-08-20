@@ -1,4 +1,0 @@
-## Append samples of your project ##
-resources:
-- workflow_v1alpha1_marketplaceworkflow.yaml
-# +kubebuilder:scaffold:manifestskustomizesamples

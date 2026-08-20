@@ -220,6 +220,9 @@ func (c *Controller) processNextWorkItem(
 		c.queue.Get()
 
 	if shutdown {
+		c.metrics.SetQueueDepth(
+			c.queue.Len(),
+		)
 
 		fmt.Printf(
 			"[WORKER %d] queue shutdown\n",
@@ -259,6 +262,12 @@ func (c *Controller) processNextWorkItem(
 		return true
 	}
 
+	// If we reached here, syncWorkflow failed.
+	// Count every failed synchronization attempt once.
+	c.metrics.Sync(
+		"failure",
+	)
+
 	var httpErr *publishing.HTTPError
 
 	if errors.As(
@@ -266,10 +275,6 @@ func (c *Controller) processNextWorkItem(
 		&httpErr,
 	) &&
 		!httpErr.Retryable() {
-
-		c.metrics.Sync(
-			"failure",
-		)
 
 		c.metrics.Dropped()
 
@@ -297,8 +302,6 @@ func (c *Controller) processNextWorkItem(
 			c.queue.NumRequeues(key)+1,
 			err,
 		)
-
-		c.queue.AddRateLimited(key)
 		c.metrics.Retry()
 
 		c.queue.

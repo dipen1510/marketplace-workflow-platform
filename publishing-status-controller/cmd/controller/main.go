@@ -80,13 +80,8 @@ func main() {
 		syscall.SIGTERM,
 	)
 	defer cancel()
-	config, err :=
-		clientcmd.BuildConfigFromFlags(
-			"",
-			*kubeconfig,
-		)
 
-	config, err = buildKubeConfig(
+	config, err := buildKubeConfig(
 		*kubeconfig,
 	)
 
